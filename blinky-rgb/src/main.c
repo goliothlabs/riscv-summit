@@ -12,6 +12,7 @@ LOG_MODULE_REGISTER(riscv_blinky, LOG_LEVEL_DBG);
 #include <net/golioth/system_client.h>
 #include <net/golioth/settings.h>
 #include <samples/common/net_connect.h>
+#include <zephyr/drivers/led_strip.h>
 #include <zephyr/net/coap.h>
 
 /* 1000 msec = 1 sec */
@@ -31,6 +32,32 @@ static struct golioth_client *client = GOLIOTH_SYSTEM_CLIENT_GET();
 static K_SEM_DEFINE(connected, 0, 1);
 
 static k_tid_t _system_thread = 0;
+
+#define STRIP_NODE		DT_ALIAS(led_strip)
+#define STRIP_NUM_PIXELS	DT_PROP(DT_ALIAS(led_strip), chain_length)
+
+#define DELAY_TIME K_MSEC(50)
+
+#define RGB(_r, _g, _b) { .r = (_r), .g = (_g), .b = (_b) }
+
+static const struct led_rgb colors[] = {
+	RGB(0x00, 0x00, 0x00), /* off */
+	RGB(0x0F, 0x00, 0x00), /* red */
+	RGB(0x00, 0x0F, 0x00), /* green */
+	RGB(0x00, 0x00, 0x0F), /* blue */
+	RGB(0x08, 0x08, 0x00), /* yellow */
+};
+
+/* Color name definitions match colors[] index */
+#define BLACK	0
+#define RED		1
+#define GREEN	2
+#define BLUE	3
+#define YELLOW	4
+
+struct led_rgb pixels[STRIP_NUM_PIXELS];
+
+static const struct device *const strip = DEVICE_DT_GET(STRIP_NODE);
 
 enum golioth_settings_status on_setting(
 		const char *key,
@@ -90,6 +117,28 @@ void main(void)
 	/* Get system thread id so loop delay change event can wake main */
 	_system_thread = k_current_get();
 
+	if (device_is_ready(strip)) {
+		LOG_INF("Found LED strip device %s", strip->name);
+	} else {
+		LOG_ERR("LED strip device %s is not ready", strip->name);
+		return;
+	}
+
+	/* This is a hack to fix incorrect SPI polarity on ESP32s2-based boards */
+	memset(&pixels, 0x00, sizeof(pixels));
+	memcpy(&pixels[0], &colors[BLACK], sizeof(struct led_rgb));
+	ret = led_strip_update_rgb(strip, pixels, STRIP_NUM_PIXELS);
+	#define SPI_CTRL_REG 0x8
+	#define SPI_D_POL 19
+	uint32_t* myreg;
+	myreg = (uint32_t*)(DT_REG_ADDR(DT_PARENT(DT_ALIAS(led_strip)))+SPI_CTRL_REG);
+	*myreg &= ~(1<<SPI_D_POL);
+
+	memcpy(&pixels[0], &colors[BLUE], sizeof(struct led_rgb));
+	ret = led_strip_update_rgb(strip, pixels, STRIP_NUM_PIXELS);
+
+	LOG_DBG("Fixing ESP32s2 Register %p Value: 0x%x", myreg, *myreg);
+
 	if (!device_is_ready(led.port)) {
 		return;
 	}
@@ -116,6 +165,14 @@ void main(void)
 				LOG_WRN("Failed to send hello!");
 		}
 		++counter;
+
+		if (counter % 2) {
+			memcpy(&pixels[0], &colors[BLUE], sizeof(struct led_rgb));
+		}
+		else {
+			memcpy(&pixels[0], &colors[BLACK], sizeof(struct led_rgb));
+		}
+		ret = led_strip_update_rgb(strip, pixels, STRIP_NUM_PIXELS);
 
 		ret = gpio_pin_toggle_dt(&led);
 		if (ret < 0) {
